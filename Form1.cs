@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Windows.Forms;
 using Steamworks;
@@ -13,6 +13,8 @@ namespace WorkshopModViewer
         private UGCQueryHandle_t _ugcQueryHandle;
         private List<WorkshopItem> _allMods = new();
         private string selectedImagePath = string.Empty;
+        private uint _currentPage = 1;
+        private uint _totalPages = 1;
 
         public Form1()
         {
@@ -44,7 +46,7 @@ namespace WorkshopModViewer
             _steamCallbackTimer.Tick += (s, e) => SteamAPI.RunCallbacks();
             _steamCallbackTimer.Start();
 
-            Load += (s, e) => QueryUserMods();
+            Load += (s, e) => QueryUserMods(true);
             listMods.SelectedIndexChanged += ListMods_SelectedIndexChanged;
 
             FormClosing += (s, e) =>
@@ -54,18 +56,27 @@ namespace WorkshopModViewer
             };
         }
 
-        private void QueryUserMods()
+        private void QueryUserMods(bool reset = false)
         {
-            UpdateStatus("Querying your published mods...");
+            if (reset)
+            {
+                _currentPage = 1;
+                _allMods.Clear();
+            }
+
+            UpdateStatus($"Querying your published mods... (Page {_currentPage})");
+
+            var accountId = SteamUser.GetSteamID().GetAccountID();
+            var appId = SteamUtils.GetAppID();
 
             _ugcQueryHandle = SteamUGC.CreateQueryUserUGCRequest(
-                SteamUser.GetSteamID().GetAccountID(),
+                accountId,
                 EUserUGCList.k_EUserUGCList_Published,
                 EUGCMatchingUGCType.k_EUGCMatchingUGCType_All,
                 EUserUGCListSortOrder.k_EUserUGCListSortOrder_CreationOrderDesc,
-                SteamUtils.GetAppID(),
-                SteamUtils.GetAppID(),
-                1);
+                appId,
+                appId,
+                _currentPage);
 
             SteamUGC.SetReturnMetadata(_ugcQueryHandle, true);
             SteamUGC.SetReturnChildren(_ugcQueryHandle, true);
@@ -74,8 +85,11 @@ namespace WorkshopModViewer
             SteamUGC.SetReturnTotalOnly(_ugcQueryHandle, false);
 
             SteamAPICall_t apiCall = SteamUGC.SendQueryUGCRequest(_ugcQueryHandle);
-            _ugcQueryCallResult?.Set(apiCall);
+
+            // 🔁 Inline callback ensures this works for each page request
+            CallResult<SteamUGCQueryCompleted_t>.Create().Set(apiCall, OnUGCQueryCompleted);
         }
+
 
         private void OnUGCQueryCompleted(SteamUGCQueryCompleted_t callback, bool ioFailure)
         {
@@ -85,22 +99,10 @@ namespace WorkshopModViewer
                 return;
             }
 
-            UpdateStatus($"Found {callback.m_unNumResultsReturned} mods.");
-
-            if (listMods.InvokeRequired)
-                listMods.Invoke(new Action(() => PopulateModsList(callback)));
-            else
-                PopulateModsList(callback);
-        }
-
-        private void PopulateModsList(SteamUGCQueryCompleted_t callback)
-        {
-            listMods.Items.Clear();
-            _allMods.Clear();
-
             if (callback.m_unNumResultsReturned == 0)
             {
-                listMods.Items.Add("(No mods found)");
+                UpdateStatus("No mods found.");
+                PopulateModsList(); // Even if it's empty
                 return;
             }
 
@@ -108,8 +110,7 @@ namespace WorkshopModViewer
             {
                 if (SteamUGC.GetQueryUGCResult(callback.m_handle, i, out SteamUGCDetails_t details))
                 {
-                    string previewURL = string.Empty;
-                    SteamUGC.GetQueryUGCPreviewURL(callback.m_handle, i, out previewURL, 260);
+                    SteamUGC.GetQueryUGCPreviewURL(callback.m_handle, i, out string previewURL, 260);
 
                     var item = new WorkshopItem(details)
                     {
@@ -120,8 +121,38 @@ namespace WorkshopModViewer
                 }
             }
 
-            FilterModList();
+            SteamUGC.ReleaseQueryUGCRequest(callback.m_handle);
+
+            // Only calculate total pages once
+            if (_currentPage == 1)
+                _totalPages = (callback.m_unTotalMatchingResults / 50) + 1;
+
+            // Fetch only next page if more remain
+            if (_currentPage < _totalPages && _currentPage < 2)
+            {
+                _currentPage++;
+                QueryUserMods(false);
+            }
+            else
+            {
+                PopulateModsList();
+            }
         }
+
+        private void PopulateModsList()
+        {
+            listMods.Items.Clear();
+
+            if (_allMods.Count == 0)
+            {
+                listMods.Items.Add("(No mods found)");
+                return;
+            }
+
+            FilterModList();
+            UpdateStatus($"Loaded {_allMods.Count} mods.");
+        }
+
 
         private void TxtSearch_TextChanged(object sender, EventArgs e)
         {
@@ -355,12 +386,19 @@ namespace WorkshopModViewer
                 }
             }
 
-            // Optional UI reset
             Task.Delay(1000).ContinueWith(_ =>
             {
                 if (!this.IsDisposed)
                 {
                     this.Invoke(new Action(() => progressBar.Value = 0));
+                }
+            });
+
+            Task.Delay(3000).ContinueWith(_ =>
+            {
+                if (!this.IsDisposed)
+                {
+                    this.Invoke(() => QueryUserMods(true));
                 }
             });
         }
