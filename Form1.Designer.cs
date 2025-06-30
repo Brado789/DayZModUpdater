@@ -1,4 +1,4 @@
-﻿using Steamworks;
+using Steamworks;
 using System.Drawing;
 using System.IO;
 
